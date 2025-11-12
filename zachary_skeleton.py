@@ -2,8 +2,11 @@ import pickle
 from jax import jit
 import jax
 import numpy as np
+import optax
 import jax.numpy as jnp
 from flax.nnx import Module
+from flax.nnx import Optimizer, value_and_grad, apply_updates
+from typing import Callable, Optional
 
 
 # === a) ===
@@ -18,9 +21,35 @@ class Graph:
         graph.src = jnp.concatenate([edge_list_array[:, 0], edge_list_array[:, 1]])
         graph.dst = jnp.concatenate([edge_list_array[:, 1], edge_list_array[:, 0]])
         graph.w = jnp.concatenate([weight_list_array, weight_list_array])
+        graph.num_nodes = jnp.max(graph.dst) + 1
 
         graph.edges = jnp.array(edge_list)
         graph.weights = jnp.array(weight_list)
+
+        # Add self-loops
+        src_i = jnp.arange(graph.num_nodes)
+        dst_i = jnp.arange(graph.num_nodes)
+        w_i = jnp.ones(graph.num_nodes)
+
+        # Combine original edges with self-loops
+        src_tilde = jnp.concatenate([graph.src, src_i])
+        dst_tilde = jnp.concatenate([graph.dst, dst_i])
+        w_tilde = jnp.concatenate([graph.w, w_i])
+
+        # Calculate degree
+        tilde_D = jax.ops.segment_sum(
+            data=w_tilde, segment_ids=dst_tilde, num_segments=graph.num_nodes
+        )
+
+        # Calculate D_tilde^{-1/2}
+        D_inv_sqrt = 1.0 / jnp.sqrt(tilde_D + 1e-10)
+
+        # Calculate W_hat
+        w_hat = w_tilde * D_inv_sqrt[src_tilde] * D_inv_sqrt[dst_tilde]
+
+        graph.w = w_hat
+        graph.src = src_tilde
+        graph.dst = dst_tilde
 
         return graph
 
@@ -28,13 +57,14 @@ class Graph:
 # Pytree registration functions for Graph:
 def _graph_flatten(graph):
     children = (graph.src, graph.dst, graph.w)
-    return children, (graph.edges, graph.weights)
+    aux_data = (graph.edges, graph.weights, graph.num_nodes)
+    return children, aux_data
 
 
 def _graph_unflatten(aux_data, children):
     graph = Graph()
     graph.src, graph.dst, graph.w = children
-    graph.edges, graph.weights = aux_data
+    graph.edges, graph.weights, graph.num_nodes = aux_data
     return graph
 
 
@@ -45,31 +75,50 @@ jax.tree_util.register_pytree_node(Graph, _graph_flatten, _graph_unflatten)
 # === b) ===
 @jit
 def gcn_layer(params, graph, data):
-    # extract source and destination indices from edges
-    src = graph.src
-    dst = graph.dst
-    weights = graph.w
-    
-    # Weighted data (in this case weights are all 1s)
-    src_weighted_data = graph.w[:, None] * data[graph.src]
 
-    num_nodes = data.shape[0]
-    # perform W * X
-    WX = jax.ops.segment_sum(data=src_weighted_data, segment_ids=src, num_segments=num_nodes)
+    # Calculate the aggregation
+    weighted_data = graph.w[:, None] * data[graph.src]
 
-    Y = jnp.dot(WX, params)
+    W_hat_X = jax.ops.segment_sum(
+        data=weighted_data, segment_ids=graph.dst, num_segments=graph.num_nodes
+    )
 
-    return Y
+    # Linear transformation
+    output = jnp.dot(W_hat_X, params)
+    return output
 
 
 # === c) ===
 class GCN(Module):
-    pass
+
+    def __init__(self, activation: Optional[Callable] = None):
+        self.activation = activation
+
+    def __call__(self, graph: Graph, data: jnp.ndarray) -> jnp.ndarray:
+        if self.theta is None:
+            raise ValueError("Parameter theta has not been initialized.")
+
+        output = gcn_layer(self.theta, graph, data)
+        if self.activation is not None:
+            output = self.activation(output)
+        return output
 
 
 # === d) ===
 class Network(Module):
-    pass
+    def __init__(
+        self,
+        activation: Optional[Callable] = None):
+        
+        self.gcn1 = GCN(activation=activation)
+        self.gcn2 = GCN(activation=jax.nn.log_softmax)
+        
+        
+    def __call__(self, graph: Graph, data: jnp.ndarray) -> jnp.ndarray:
+        hidden = self.gcn1(graph, data)
+        output = self.gcn2(graph, hidden)
+        return output
+    
 
 
 def main():
@@ -83,6 +132,10 @@ def main():
     layer.theta = dummy_params
     output = layer(G, dummy_input)
     assert np.isclose(output, dummy_output).all()
+    
+    # Build the full network
+    
+    
 
 
 if __name__ == "__main__":
