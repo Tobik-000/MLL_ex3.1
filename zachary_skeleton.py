@@ -4,8 +4,7 @@ import jax
 import numpy as np
 import optax
 import jax.numpy as jnp
-from flax.nnx import Module
-from flax.nnx import Optimizer, value_and_grad
+from flax.nnx import Module, Optimizer, value_and_grad
 from typing import Callable, Optional
 import flax.nnx as nnx
 
@@ -100,7 +99,7 @@ class GCN(Module):
         activation: Optional[Callable] = None,
     ):
         self.activation = activation
-        #self.theta: Optional[jnp.ndarray] = None
+        # self.theta: Optional[jnp.ndarray] = None
         # Initialize parameters if rng and dimensions are provided
         if rng is not None and num_nodes > 0 and hidden_dim > 0:
             self.theta = nnx.Param(jax.random.uniform(rng, (num_nodes, hidden_dim)))
@@ -175,7 +174,7 @@ def train_step(
     graph: Graph,
     data: jnp.ndarray,
     labels: jnp.ndarray,
-    optimizer: Optimizer,
+    optimizer: nnx.ModelAndOptimizer,
 ):
     loss, grads = value_and_grad(lambda m: loss_fn(m, graph, data, labels))(model)
 
