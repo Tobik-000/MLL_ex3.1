@@ -5,8 +5,9 @@ import numpy as np
 import optax
 import jax.numpy as jnp
 from flax.nnx import Module
-from flax.nnx import Optimizer, value_and_grad, apply_updates
+from flax.nnx import Optimizer, value_and_grad
 from typing import Callable, Optional
+import flax.nnx as nnx
 
 
 # === a) ===
@@ -91,14 +92,24 @@ def gcn_layer(params, graph, data):
 # === c) ===
 class GCN(Module):
 
-    def __init__(self, activation: Optional[Callable] = None):
+    def __init__(
+        self,
+        rng: jax.random.PRNGKey = None,
+        num_nodes: int = 0,
+        hidden_dim: int = 0,
+        activation: Optional[Callable] = None,
+    ):
         self.activation = activation
+        #self.theta: Optional[jnp.ndarray] = None
+        # Initialize parameters if rng and dimensions are provided
+        if rng is not None and num_nodes > 0 and hidden_dim > 0:
+            self.theta = nnx.Param(jax.random.uniform(rng, (num_nodes, hidden_dim)))
 
     def __call__(self, graph: Graph, data: jnp.ndarray) -> jnp.ndarray:
         if self.theta is None:
             raise ValueError("Parameter theta has not been initialized.")
 
-        output = gcn_layer(self.theta, graph, data)
+        output = gcn_layer(self.theta.value, graph, data)
         if self.activation is not None:
             output = self.activation(output)
         return output
@@ -108,17 +119,69 @@ class GCN(Module):
 class Network(Module):
     def __init__(
         self,
-        activation: Optional[Callable] = None):
-        
-        self.gcn1 = GCN(activation=activation)
-        self.gcn2 = GCN(activation=jax.nn.log_softmax)
-        
-        
+        rng: jax.random.PRNGKey,
+        num_nodes: int,
+        hidden_dim: int,
+        activation: Optional[Callable] = None,
+    ):
+        self.gcn1 = GCN(
+            rng=rng, num_nodes=num_nodes, hidden_dim=hidden_dim, activation=jax.nn.relu
+        )
+        self.gcn2 = GCN(rng=rng, num_nodes=hidden_dim, hidden_dim=2)
+
     def __call__(self, graph: Graph, data: jnp.ndarray) -> jnp.ndarray:
         hidden = self.gcn1(graph, data)
         output = self.gcn2(graph, hidden)
         return output
-    
+
+
+def loss_fn(model: Network, graph: Graph, data: jnp.ndarray, labels: jnp.ndarray):
+    logits = model(graph, data)
+
+    labels = jnp.asarray(labels)
+    if labels.ndim == 1 or (labels.ndim == 2 and labels.shape[-1] != 2):
+        labels = jax.nn.one_hot(labels, 2).astype(jnp.float32)
+    else:
+        labels = labels.astype(jnp.float32)
+
+    losses = optax.sigmoid_binary_cross_entropy(logits, labels=labels)
+
+    # Create a mask to only consider first and last nodes
+    mask = jnp.zeros_like(losses)
+    mask = mask.at[0].set(1.0)
+    mask = mask.at[-1].set(1.0)
+
+    loss = jnp.mean(losses * mask)
+    return loss
+
+
+def accuracy_fn(model: Network, graph: Graph, data: jnp.ndarray, labels: jnp.ndarray):
+    logits = model(graph, data)
+    preds = jnp.argmax(logits, axis=1)
+    labels = jnp.asarray(labels)
+
+    N = logits.shape[0]
+    mask = jnp.ones(N, dtype=bool)
+    mask = mask.at[0].set(False)
+    mask = mask.at[-1].set(False)
+
+    acc = jnp.mean((preds == labels)[mask])
+
+    return acc
+
+
+def train_step(
+    model: Network,
+    graph: Graph,
+    data: jnp.ndarray,
+    labels: jnp.ndarray,
+    optimizer: Optimizer,
+):
+    loss, grads = value_and_grad(lambda m: loss_fn(m, graph, data, labels))(model)
+
+    optimizer.update(grads)
+
+    return optimizer.model, optimizer, loss
 
 
 def main():
@@ -129,13 +192,30 @@ def main():
     assert np.isclose(output, dummy_output).all()
 
     layer = GCN()
-    layer.theta = dummy_params
+    layer.theta = nnx.Param(dummy_params)
     output = layer(G, dummy_input)
     assert np.isclose(output, dummy_output).all()
-    
+
+    # Parameters for network
+    N = G.num_nodes
+    hidden_dim = 16
+    X = jnp.eye(N)
+
+    key = jax.random.PRNGKey(0)
+
     # Build the full network
-    
-    
+    model = Network(rng=key, num_nodes=N, hidden_dim=hidden_dim, activation=jax.nn.relu)
+
+    optimizer = nnx.ModelAndOptimizer(model, optax.adam(learning_rate=0.01))
+
+    for epoch in range(100):
+        model, optimizer, loss = train_step(model, G, X, labels, optimizer)
+        if epoch % 10 == 0:
+            acc = accuracy_fn(model, G, X, labels)
+            print(f"Epoch {epoch:03d}, Loss: {float(loss):.4f}, Acc: {float(acc):.4f}")
+
+    final_acc = accuracy_fn(model, G, X, labels)
+    print(f"Final Loss: {float(loss):.4f}, Final Accuracy: {float(final_acc):.4f}")
 
 
 if __name__ == "__main__":
