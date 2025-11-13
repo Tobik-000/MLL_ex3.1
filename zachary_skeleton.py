@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from flax.nnx import Module, Optimizer, value_and_grad
 from typing import Callable, Optional
 import flax.nnx as nnx
+import matplotlib.pyplot as plt
 
 
 # === a) ===
@@ -207,14 +208,31 @@ def main():
 
     optimizer = nnx.ModelAndOptimizer(model, optax.adam(learning_rate=0.01))
 
+    loss_history = []
+    accuracy_history = []
+
     for epoch in range(100):
         model, optimizer, loss = train_step(model, G, X, labels, optimizer)
+        loss_history.append(loss)
+        accuracy_history.append(accuracy_fn(model, G, X, labels))
+
         if epoch % 10 == 0:
             acc = accuracy_fn(model, G, X, labels)
             print(f"Epoch {epoch:03d}, Loss: {float(loss):.4f}, Acc: {float(acc):.4f}")
 
     final_acc = accuracy_fn(model, G, X, labels)
     print(f"Final Loss: {float(loss):.4f}, Final Accuracy: {float(final_acc):.4f}")
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(loss_history, label="Loss")
+    plt.plot(accuracy_history, label="Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Value")
+    plt.title("Training Loss and Accuracy")
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig("training_metrics.png")
 
 
 if __name__ == "__main__":
